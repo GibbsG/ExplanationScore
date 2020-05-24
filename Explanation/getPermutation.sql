@@ -7,11 +7,18 @@ DECLARE
    feature_set_new boolean[23];
    i int := 0; -- the total amount of checks we used
 BEGIN
+  IF (start_index = 0) then
+    SELECT into value_i avg(label)
+    FROM testDataWithLabel;
+
+    INSERT INTO valid_subsets VALUES(0, value_i);
+    start_index = start_index + 1;
+  END IF;
 	LOOP
 		EXIT WHEN start_index = 24;
     i := i+1;
+    feature_set_new = copy_array(features_set);
     -- get the new set of test_features
-		feature_set_new := copy_array(features_set);
     feature_set_new[start_index] := TRUE;
     -- get the int represent the set
     representation := int_representation(feature_set_new);
@@ -30,19 +37,6 @@ END;
 $$
 LANGUAGE plpgsql;
 
-
-CREATE or REPLACE function set_checked(representation int)
-  returns int AS $$
-DECLARE
-  checked int;
-BEGIN
-  SELECT INTO checked count(*)
-  FROM valid_subsets
-  WHERE features = representation;
-  return checked;
-END;
-$$
-language plpgsql;
 
 
 
@@ -90,7 +84,7 @@ DECLARE
   return_value float;
 BEGIN
   SELECT into return_value avg(label)
-  FROM trainDataWithLabel
+  FROM testDataWithLabel
   WHERE (test_features[1] = false or ExternalRiskEstimate = test_value[1])
     and (test_features[2] = false or MSinceOldestTradeOpen = test_value[2])
     and (test_features[3] = false or MSinceMostRecentTradeOpen = test_value[3])
