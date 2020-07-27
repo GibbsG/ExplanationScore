@@ -15,11 +15,16 @@ public class Expl {
             "NumRevolvingTradesWBalance", "NumInstallTradesWBalance", "NumBank2NatlTradesWHighUtilization",
             "PercentTradesWBalance"
     };
+    private static final int[] MONOTONE = new int[]{-1, -1, -1, -1, -1, 1, 0, -1, -1, -1, -1, 0, 1, 1, -1, 1,
+            1, 1, 1, 0, 0, 1, 1};
+    private static final int[] DIMENSIONS = new int[] {5, 4, 2, 4, 5, 5, 4, 5, 4, 3, 2, 5, 5, 5, 5, 4, 2, 4, 3, 5, 5, 5, 5};
+
+    private static final int[] BEST_INDEX = new int[] {5, 4, 2, 4, 5, 1, 3, 5, 4, 3, 2, 5, 1, 1, 5, 1, 1, 1, 1, 2, 4, 1, 1};
     public static  Instant START;
     public static void main(String[] args) throws SQLException, IOException {
         Connection conn =  connect();
         conn.setAutoCommit(false);
-        //createClassifier(conn);
+        // createClassifier(conn);
 
 
         // sample the test data and training data
@@ -475,18 +480,25 @@ public class Expl {
      */
     public static void getRespScore(Connection conn, int trainSize)
             throws SQLException, IOException {
-//        String path = "/Users/gzx/Desktop/research/fico/heloc_dataset_v2.csv";
-//        String testTableName = "testDataWithBucket";
-//        String trainTableName = "trainDataWithBucket";
-//        createTable(conn, path, testTableName);
-//        createTable(conn, path, trainTableName);
+        String dropQuery = "";
+        for (int i = 0; i < TEST_FEATURES.length; i++) {
+            dropQuery = dropQuery + " drop view if exists ff" + TEST_FEATURES[i] + " ; ";
+        }
+        dropQuery = dropQuery + "drop TABLE if exists piece; drop TABLE if exists testDataWithBucket; drop TABLE if exists trainDataWithBucket;";
+        PreparedStatement drop = conn.prepareStatement(dropQuery);
+        drop.execute();
+        String path = "/Users/gzx/Desktop/research/fico/heloc_dataset_v2.csv";
+        String testTableName = "testDataWithBucket";
+        String trainTableName = "trainDataWithBucket";
+        createTable(conn, path, testTableName);
+        createTable(conn, path, trainTableName);
         // create the view of each fearture.
-//        insertForFixTestAndTrainWithBucket(conn,  "testDataWithBucket",
-//                "trainDataWithBucket");
-//       createViewWithBucketSize(conn, TEST_FEATURES); // comment as already run
-//
-//        // create the table to store the next test entity
-//        createTable(conn, path, "piece");
+        insertForFixTestAndTrainWithBucket(conn,  "testDataWithBucket",
+                "trainDataWithBucket");
+       createViewWithBucketSize(conn, TEST_FEATURES); // comment as already run
+
+        // create the table to store the next test entity
+        createTable(conn, path, "piece");
 
         // let the arrays to stores the count of most important result
         double[] mostImportantFeature = new double[23];
@@ -516,8 +528,7 @@ public class Expl {
                 }
                 total++;
                 // the scores for each feature with the entities
-                double[] scores = getScoreWithNullContingencySet(conn, trainSize);
-
+                double[] scores = getScoreWithNullContingencySetWithMonotonicity(conn, trainSize);
                 // check that whether need to start with a contingency set, count is the number of 0-scores we get
                 // with null contingent set
                 int count = 0;
@@ -529,15 +540,33 @@ public class Expl {
                 // get the score with contingency set of size 1
                 if (count == 23) {
                     // get the score with contingency set of size 1
-                    scores = getScoreWithContingencySetSize1(conn,  trainSize);
+                    scores = getScoreWithContingencySetSize1WithMonotoneExtra(conn, trainSize);
+                    // check for correctness
+                    if (!Arrays.equals(scores, getScoreWithContingencySetSize1WithMonotone(conn, trainSize))) {
+                        System.out.println(Arrays.toString(scores));
+                        System.out.println(Arrays.toString(getScoreWithContingencySetSize1WithMonotone(conn, trainSize)));
+                        assert  false;
+                    }
+                    int countC1 = 0;
+                    for (int i = 0; i < TEST_FEATURES.length; i++) {
+                        if (scores[i] == 0) {
+                            countC1++;
+                        }
+                    }
+                    if (countC1 == 23) {
+                        scores = getScoreWithContingencySetSize2WithMonotoneExtra(conn, trainSize);
+                        zero2++;
+                        System.out.println(zero2);
+                    }
                     zero++;
+                    //System.out.println(1);
                 } else {
                     zeroNo++;
                 }
                 getMostImportantFeature(scores, mostImportantFeature, most4ImportantFeature);
-                System.out.println(Arrays.toString(scores));
-                System.out.println(Arrays.toString(mostImportantFeature));
-                System.out.println(Arrays.toString(most4ImportantFeature));
+                //System.out.println(Arrays.toString(scores));
+//                System.out.println(Arrays.toString(mostImportantFeature));
+//                System.out.println(Arrays.toString(most4ImportantFeature));
                 conn.commit();
             }
             // when two contingent set with size 1, there will be two feature has the same score?
@@ -566,6 +595,60 @@ public class Expl {
         PreparedStatement getEntity = conn.prepareStatement(getEntitySql);
         ResultSet result = getEntity.executeQuery();
         return result;
+    }
+
+    /**
+     * get the resp score with null contingency set for an entity
+     *
+     * @param conn connection to database
+     * @param trainSize the train data size
+     * @return the scores of each feature given the entity in the piece table
+     */
+    public static double[] getScoreWithNullContingencySetWithMonotonicity(Connection conn, int trainSize)
+            throws SQLException {
+        double[] scores = new double[TEST_FEATURES.length];
+        // for each of the feature get the score
+        String getEntitySQL = "select * from piece;";
+        PreparedStatement getEntity = conn.prepareStatement(getEntitySQL);
+        ResultSet entity = getEntity.executeQuery();
+        entity.next();
+        for (int i = 0; i < TEST_FEATURES.length; i++) {
+            String getScoreSQL = "select sum(f.count * (1-classifier( ";
+            for (int j = 0; j < TEST_FEATURES.length-1; j++) {
+                if (i == j){
+                    getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[j] + ", ";
+                } else {
+                    getScoreSQL = getScoreSQL + "t." + TEST_FEATURES[j] + ", ";
+                }
+            }
+            if (i == 22) {
+                getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[22] + " )))";
+            } else {
+                getScoreSQL = getScoreSQL + "t." + TEST_FEATURES[22] + " )))";
+            }
+            getScoreSQL = getScoreSQL + "from piece as t, ff" + TEST_FEATURES[i] +" as f ";
+            if (MONOTONE[i] == -1 && entity.getInt(i+1) <= DIMENSIONS[i]) {
+                getScoreSQL = getScoreSQL + "where f." + TEST_FEATURES[i]  + "> t." + TEST_FEATURES[i] + " or f." +
+                        TEST_FEATURES[i] + " >" + DIMENSIONS[i] + ";";
+            } else if (MONOTONE[i] == 1 && entity.getInt(i+1) <= DIMENSIONS[i]) {
+                getScoreSQL = getScoreSQL + "where f." + TEST_FEATURES[i]  + "< t." + TEST_FEATURES[i] + " or f." +
+                        TEST_FEATURES[i] + " > " + DIMENSIONS[i] + ";";
+            } else {
+                getScoreSQL = getScoreSQL + ";";
+            }
+            // Stem.out.println(getScoreSQL);
+            PreparedStatement getScore = conn.prepareStatement(getScoreSQL);
+            ResultSet resultSet = getScore.executeQuery();
+            resultSet.next();
+            double score = resultSet.getInt(1);
+
+            resultSet.close();
+            // check whether the score is 0 and need recompute with contingency set size 1
+            // the contingency set can be any feature not the current feature -- feature[i]
+            score = score / trainSize;
+            scores[i] = score;
+        }
+        return scores;
     }
 
     /**
@@ -609,6 +692,192 @@ public class Expl {
         }
         return scores;
     }
+
+    /**
+     * get the resp score with contingency set size 1 for an entity
+     *
+     * @param conn connection to database
+     * @param trainSize the train data size
+     * @return the scores of each feature given the entity in the piece table
+     */
+    public static double[] getScoreWithContingencySetSize1WithMonotoneExtra(Connection conn, int trainSize)
+            throws SQLException {
+        double[] scores = new double[TEST_FEATURES.length];
+        // get the current entity used for checking whether the value of the feature is in undefined range
+        String getEntitySQL = "select * from piece;";
+        PreparedStatement getEntity = conn.prepareStatement(getEntitySQL);
+        ResultSet entity = getEntity.executeQuery();
+        entity.next();
+        for (int i = 0; i < TEST_FEATURES.length; i++) {
+
+            double score = 0;
+            // for each feature check each of the contingency feature
+            for (int j = 0; j < TEST_FEATURES.length; j++) {
+                if (i != j) {
+                    double currentScore = 0;
+                    // set the other value to the best value, while others remain as the version without extra
+                    String getScoreSQL = "With temp as( select f.count as count_i, classifier( ";
+                    for (int k = 0; k < TEST_FEATURES.length - 1; k++) {
+                        if (k == i) {
+                            getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[k] + ", ";
+                        } else if (k == j) {
+                            getScoreSQL = getScoreSQL + "c." + TEST_FEATURES[k] + ", ";
+                        } else {
+                            getScoreSQL = getScoreSQL + "t." + TEST_FEATURES[k] + ", ";
+                        }
+                    }
+                    if (i == 22) {
+                        getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[22] + " )";
+                    } else if (j == 22) {
+                        getScoreSQL = getScoreSQL + "c." + TEST_FEATURES[22] + " )";
+                    } else {
+                        getScoreSQL = getScoreSQL + "t." + TEST_FEATURES[22] + " )";
+                    }
+                    getScoreSQL = getScoreSQL + " as class, c." + TEST_FEATURES[j] + " from piece as t, ff" + TEST_FEATURES[i] + " as f, ff" +
+                            TEST_FEATURES[j] + " as c where c." + TEST_FEATURES[j] + " = " + BEST_INDEX[j];
+                    // if i has monotonicity, use it
+                    if (MONOTONE[i] == -1 && entity.getInt(i+1) <= DIMENSIONS[i]) {
+                        getScoreSQL = getScoreSQL + " and (f." +  TEST_FEATURES[i]  + "> t." + TEST_FEATURES[i] +
+                                " or f." + TEST_FEATURES[i] + " > " + DIMENSIONS[i] + "))";
+                    } else if (MONOTONE[i] == 1 && entity.getInt(i+1) <= DIMENSIONS[i]) {
+                        getScoreSQL = getScoreSQL + " and (f." +  TEST_FEATURES[i]  + "< t." + TEST_FEATURES[i] +
+                                " or f." + TEST_FEATURES[i] + " > " + DIMENSIONS[i] + "))";
+                    } else {
+                        getScoreSQL = getScoreSQL + ")";
+                    }
+                    getScoreSQL = getScoreSQL + ", tempFirst as (select sum(temp.count_i*(1-temp.class)) as s from temp  " +
+                            "group by  temp." + TEST_FEATURES[j] + ")  select max(s) from tempFirst ;";
+                    PreparedStatement getScore = conn.prepareStatement(getScoreSQL);
+                    //System.out.println(getScoreSQL);
+                    ResultSet resultSet = getScore.executeQuery();
+                    resultSet.next();
+                    currentScore = resultSet.getInt(1);
+                    resultSet.close();
+                    if (score < currentScore) {
+                        score = currentScore;
+                    }
+                }
+            }
+            score = score / trainSize /2;
+            scores[i] = score;
+        }
+        return scores;
+    }
+
+
+
+
+    /**
+     * get the resp score with contingency set size 1 for an entity
+     *
+     * @param conn connection to database
+     * @param trainSize the train data size
+     * @return the scores of each feature given the entity in the piece table
+     */
+    public static double[] getScoreWithContingencySetSize1WithMonotone(Connection conn, int trainSize)
+            throws SQLException {
+        double[] scores = new double[TEST_FEATURES.length];
+        double[][] values = new double[23][23];
+        String getEntitySQL = "select * from piece;";
+        PreparedStatement getEntity = conn.prepareStatement(getEntitySQL);
+        ResultSet entity = getEntity.executeQuery();
+        entity.next();
+        for (int i = 0; i < TEST_FEATURES.length; i++) {
+
+            double score = 0;
+            // for each feature check each of the contingency feature
+            for (int j = 0; j < TEST_FEATURES.length; j++) {
+                if (i != j) {
+                    double currentScore = 0;
+                    if (i > j) {
+                        currentScore = values[j][i];
+                    } else {
+                        String getScoreSQL = "With temp as( select f.count as count_i, c.count as count_j, f." +
+                                TEST_FEATURES[i] + ", c." +  TEST_FEATURES[j] + ", classifier( ";
+                        for (int k = 0; k < TEST_FEATURES.length-1; k++) {
+                            if (k == i){
+                                getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[k] + ", ";
+                            } else if (k == j) {
+                                getScoreSQL = getScoreSQL + "c." + TEST_FEATURES[k] + ", ";
+                            } else {
+                                getScoreSQL = getScoreSQL + "t." + TEST_FEATURES[k] + ", ";
+                            }
+                        }
+                        if (i == 22) {
+                            getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[22] + " )";
+                        } else if (j == 22) {
+                            getScoreSQL = getScoreSQL + "c." + TEST_FEATURES[22] + " )";
+                        } else {
+                            getScoreSQL = getScoreSQL + "t." + TEST_FEATURES[22] + " )";
+                        }
+                        getScoreSQL = getScoreSQL + " as class from piece as t, ff" + TEST_FEATURES[i] + " as f, ff" +
+                                TEST_FEATURES[j] + " as c ";
+                        int before = 0;
+                        if (MONOTONE[i] == -1 && entity.getInt(i+1) <= DIMENSIONS[i]) {
+                            before = 1;
+                            getScoreSQL = getScoreSQL + "where (f." + TEST_FEATURES[i]  + "> t." + TEST_FEATURES[i] +
+                                    " or f." + TEST_FEATURES[i] + " > " + DIMENSIONS[i] + ")";
+                        } else if (MONOTONE[i] == 1 && entity.getInt(i+1) <= DIMENSIONS[i]) {
+                            before = 1;
+                            getScoreSQL = getScoreSQL + "where (f." + TEST_FEATURES[i]  + "< t." + TEST_FEATURES[i] +
+                                    " or f." + TEST_FEATURES[i] + " > " + DIMENSIONS[i] + ")";
+                        }
+
+                        if (MONOTONE[j] == -1 && entity.getInt(j+1) <= DIMENSIONS[j]) {
+                            if (before!= 0) {
+                                getScoreSQL = getScoreSQL + " or (c." + TEST_FEATURES[j]  +
+                                        "> t." + TEST_FEATURES[j] + " or c." + TEST_FEATURES[j] + " > " + DIMENSIONS[j] + "))";
+                            } else {
+                                getScoreSQL = getScoreSQL + " where (c." + TEST_FEATURES[j]  +
+                                        "> t." + TEST_FEATURES[j] + " or c." + TEST_FEATURES[j] + " > " + DIMENSIONS[j] + "))";
+                            }
+                        } else if (MONOTONE[j] == 1 && entity.getInt(j+1) <= DIMENSIONS[j]) {
+                            if (before!= 0) {
+                                getScoreSQL = getScoreSQL + " or (c." + TEST_FEATURES[j]  +
+                                        "> t." + TEST_FEATURES[j] + " or c." + TEST_FEATURES[j] + " > " + DIMENSIONS[j] + "))";
+                            } else {
+                                getScoreSQL = getScoreSQL + " where (c." + TEST_FEATURES[j]  + "< t." + TEST_FEATURES[j]
+                                        + " or c." + TEST_FEATURES[j] + " > " + DIMENSIONS[j] + "))";
+                            }
+                        } else {
+                            getScoreSQL = getScoreSQL + ")";
+                        }
+
+                        getScoreSQL = getScoreSQL + ", tempFirst as (select sum(temp.count_i*(1-temp.class)) as s from temp  " +
+                                "group by  temp." + TEST_FEATURES[j] + ") , temSecond  as " +
+                                "(select sum(temp.count_j*(1-temp.class))  as s from temp  group by  temp." + TEST_FEATURES[i] +
+                                ") select max(s), 1 from tempFirst union select max(s), 2 from temSecond" +
+                                ";";
+                        //System.out.println(getScoreSQL);
+                        PreparedStatement getScore = conn.prepareStatement(getScoreSQL);
+                        ResultSet resultSet = getScore.executeQuery();
+                        resultSet.next();
+                        if (resultSet.getInt(2) == 1) {
+                            currentScore = resultSet.getInt(1);
+                            double nextScore = resultSet.getInt(1);
+                            if (resultSet.next()) {
+                                nextScore = resultSet.getInt(1);
+                            }
+                            values[i][j] = nextScore;
+                        } else {
+                            double nextScore = resultSet.getInt(1);
+                            resultSet.next();
+                            currentScore = resultSet.getInt(1);
+                            values[i][j] = nextScore;
+                        }
+                        resultSet.close();
+                    }
+                    if (score < currentScore) {
+                        score = currentScore;
+                    }
+                }
+            }
+            score = score / trainSize /2;
+            scores[i] = score;
+        }
+        return scores;
+    }
+
 
     /**
      * get the resp score with contingency set size 1 for an entity
@@ -682,6 +951,96 @@ public class Expl {
             }
             score = score / trainSize /2;
             scores[i] = score;
+        }
+        return scores;
+    }
+
+
+    /**
+     *get the resp score with contingency set size 1 for an entity
+     *
+     * @param conn connection to database
+     * @param trainSize the train data size
+     * @return the scores of each feature given the entity in the piece table
+     */
+    public static double[] getScoreWithContingencySetSize2WithMonotoneExtra(Connection conn, int trainSize)
+            throws SQLException {
+        double[] scores = new double[TEST_FEATURES.length];
+        // get the current entity used for checking whether the value of the feature is in undefined range
+        String getEntitySQL = "select * from piece;";
+        PreparedStatement getEntity = conn.prepareStatement(getEntitySQL);
+        ResultSet entity = getEntity.executeQuery();
+        entity.next();
+        Set<Set<Integer>> zeroValues = new HashSet<>();
+        // x is the current interest feature while y and z are the contingent feature
+        for (int x = 0; x < TEST_FEATURES.length; x++) {
+            double score = 0;
+            // for each feature check each of the contingency feature
+            for (int y = 0; y < TEST_FEATURES.length; y++) {
+                if (x != y) {
+                    for (int z = 0; z < TEST_FEATURES.length; z++) {
+                        if (z != x && z != y) {
+                            Set<Integer> value = new HashSet<>();
+                            value.add(x);
+                            value.add(y);
+                            value.add(z);
+                            if (!zeroValues.contains(value)) {
+                                double currentScore = 0;
+                                // set the other value to the best value, while others remain as the version without extra
+                                String getScoreSQL = "With temp as( select sum(f.count * (1-classifier(";
+                                for (int k = 0; k < TEST_FEATURES.length - 1; k++) {
+                                    if (k == x) {
+                                        getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[k] + ", ";
+                                    } else if (k == y) {
+                                        getScoreSQL = getScoreSQL + "c1." + TEST_FEATURES[k] + ", ";
+                                    } else if (k == z) {
+                                        getScoreSQL = getScoreSQL + "c2." + TEST_FEATURES[k] + ", ";
+                                    } else {
+                                        getScoreSQL = getScoreSQL + "e." + TEST_FEATURES[k] + ", ";
+                                    }
+                                }
+                                if (x == 22) {
+                                    getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[22];
+                                } else if (y == 22) {
+                                    getScoreSQL = getScoreSQL + "c1." + TEST_FEATURES[22];
+                                }  else if (z == 22) {
+                                    getScoreSQL = getScoreSQL + "c2." + TEST_FEATURES[22];
+                                } else {
+                                    getScoreSQL = getScoreSQL + "e." + TEST_FEATURES[22];
+                                }
+                                getScoreSQL = getScoreSQL + "))) as s from piece as e, ff" + TEST_FEATURES[x] +
+                                        " as f, ff" + TEST_FEATURES[y] + " as c1, ff" + TEST_FEATURES[z] + " as c2 " +
+                                        "where c1." + TEST_FEATURES[y] + " = " + BEST_INDEX[y] + " and c2." +
+                                        TEST_FEATURES[z] + " = " + BEST_INDEX[z];
+
+                                if (MONOTONE[x] == -1 && entity.getInt(x+1) <= DIMENSIONS[x]) {
+                                    getScoreSQL = getScoreSQL + " and (f." +  TEST_FEATURES[x]  + "> e." + TEST_FEATURES[x] +
+                                            " or f." + TEST_FEATURES[x] + " > " + DIMENSIONS[x] + ")";
+                                } else if (MONOTONE[x] == 1 && entity.getInt(x+1) <= DIMENSIONS[x]) {
+                                    getScoreSQL = getScoreSQL + " and (f." +  TEST_FEATURES[x]  + "< e." + TEST_FEATURES[x] +
+                                            " or f." + TEST_FEATURES[x] + " > " + DIMENSIONS[x] + ")";
+                                }
+                                getScoreSQL = getScoreSQL + " group by c1." + TEST_FEATURES[y] + ", c2." + TEST_FEATURES[z]
+                                        + ") select max(s) from temp;";
+                                PreparedStatement getScore = conn.prepareStatement(getScoreSQL);
+                                //System.out.println(getScoreSQL);
+                                ResultSet resultSet = getScore.executeQuery();
+                                resultSet.next();
+                                currentScore = resultSet.getInt(1);
+                                resultSet.close();
+                                if (currentScore == 0) {
+                                    zeroValues.add(value);
+                                } else if (score < currentScore) {
+                                    score = currentScore;
+                                }
+                            }
+                        }
+                    }
+
+                }
+            }
+            score = score / trainSize /3;
+            scores[x] = score;
         }
         return scores;
     }
@@ -1205,195 +1564,8 @@ public class Expl {
      * @param conn the connection to the database
      */
     public static void createClassifier(Connection conn) throws SQLException {
-        String functionForFeatureSQL = "create or replace function feternal_risk_subscore_from_index(\n" +
-                "\t index int\n" +
-                ")\n" +
-                "returns float as $$\n" +
-                "DECLARE\n" +
-                "  weights float[] := '{2.9895622, 2.1651128, 1.4081029, 0.7686735, 0, 0, 0, 1.6943381}';\n" +
-                "  score_1 float := -1.4308699;\n" +
-                "  raw float := 0;\n" +
-                "begin\n" +
-                "  raw :=  score_1+weights[index];\n" +
-                "  raw := 1.5671672 / (1+exp(-raw));\n" +
-                "  return raw;\n" +
-                "end;\n" +
-                "$$\n" +
-                "language plpgsql;\n" +
-                "\n" +
-                "\n" +
-                "\n" +
-                "create or replace function ftrade_open_time_subscore_from_index(\n" +
-                "\tindex int[]\n" +
-                ")\n" +
-                "returns float as $$\n" +
-                "DECLARE\n" +
-                "  weights1 float[] := '{8.20842027e-01, 0.525120503, 0.245257364, 0.005524848, 0, 0.418318111, 0.435851213}';\n" +
-                "  weights2 float[] := '{0.031074792, 0.006016629, 0, 0, 0.027688067}';\n" +
-                "  weights3 float[] := '{1.209930852, 0.694452470, 0.296029824, 0, 0, 0, 0.471490736}';\n" +
-                "  weight float := -0.696619002;\n" +
-                "  raw float := 0;\n" +
-                "begin\n" +
-                "  raw := weight+(weights1[index[1]] + weights2[index[2]] + weights3[index[3]]);\n" +
-                "  raw := 2.5236825 / (1+exp(-raw));\n" +
-                "  return raw;\n" +
-                "end;\n" +
-                "$$\n" +
-                "language plpgsql;\n" +
-                "\n" +
-                "\n" +
-                "create or replace function fnum_sat_trades_subscore_from_index(\n" +
-                "  index int\n" +
-                ")\n" +
-                "returns float as $$\n" +
-                "DECLARE\n" +
-                "  weights float[] := '{2.412574, 1.245278, 0.6619963, 0.2731984, 5.444148e-09, 0, 0, 0.4338848}';\n" +
-                "  score_1 float := -0.1954726;\n" +
-                "  raw float := 0;\n" +
-                "begin\n" +
-                "  raw :=  score_1+weights[index];\n" +
-                "  raw := 2.1711503 / (1+exp(-raw));\n" +
-                "  return raw;\n" +
-                "end;\n" +
-                "$$\n" +
-                "language plpgsql;\n" +
-                "\n" +
-                "\n" +
-                "\n" +
-                "create or replace function ftrade_freq_subscore_from_index(\n" +
-                "\tindex int[]\n" +
-                ")\n" +
-                "returns float as $$\n" +
-                "DECLARE\n" +
-                "  weights1 float[] := '{2.710260e-04, 9.195886e-01, 9.758620e-01, 1.008107e+01, 9.360290, 0, 0, 3.970360e-01}';\n" +
-                "  weights2 float[] := '{1.514937e-01, 3.139667e-01, 0, 2.422345e-01, 0, 0, 3.095043e-02}';\n" +
-                "  weights3 float[] := '{2.888436e-01, 9.659472e-01, 5.142479e-01, 2.653203e-01, 8.198233e-07, 0, 0, 3.233593e-01}';\n" +
-                "  weights4 float[] := '{8.405069e-06, 3.374686e-01, 4.934466e-01, 8.601860e-01, 9.451724, 0, 0, 1.351433e-01}';\n" +
-                "  weight float := -6.480598e-01;\n" +
-                "  raw float := 0;\n" +
-                "begin\n" +
-                "  raw :=  weight+(weights1[index[1]] + weights2[index[2]] + weights3[index[3]] + weights4[index[4]]);\n" +
-                "  raw :=  0.3323177 / (1+exp(-raw));\n" +
-                "  return raw;\n" +
-                "end;\n" +
-                "$$\n" +
-                "language plpgsql;\n" +
-                "\n" +
-                "\n" +
-                "\n" +
-                "create or replace function fdelinquency_subscore_from_index(\n" +
-                "\tindex int[]\n" +
-                ")\n" +
-                "returns float as $$\n" +
-                "DECLARE\n" +
-                "  weights1 float[] := '{1.658975, 1.218405, 8.030501e-01, 5.685712e-01, 0, 0, 0, 6.645698e-01}';\n" +
-                "  weights2 float[] := '{4.014945e-01, 2.912651e-01, 5.665418e-02, 0,6.935965e-01, 5.470874e-01, 4.786956e-01}';\n" +
-                "  weights3 float[] := '{1.004642, 5.654694e-01, 0, 0, 0, 2.841047e-01}';\n" +
-                "  weight float := -1.199469;\n" +
-                "  raw float := 0;\n" +
-                "begin\n" +
-                "  raw :=  weight+(weights1[index[1]] + weights2[index[2]] + weights3[index[3]]);\n" +
-                "  raw := 2.5396631 / (1+exp(-raw));\n" +
-                "  return raw;\n" +
-                "end;\n" +
-                "$$\n" +
-                "language plpgsql;\n" +
-                "\n" +
-                "\n" +
-                "create or replace function fnstallment_subscore_from_index(\n" +
-                "\tindex int[]\n" +
-                ")\n" +
-                "returns float as $$\n" +
-                "DECLARE\n" +
-                "  raw float := 0;\n" +
-                "  weights1 float[] := '{9.059412e-05, 1.292266e-01, 4.680034e-01, 8.117938e-01, 1.954441, 0, 0, 1.281830}';\n" +
-                "  weights2 float[] := '{0, 1.432068e-01, 3.705526e-01, 0, 4.972869e-03, 1.513885e-01}';\n" +
-                "  weights3 float[] := '{1.489759, 1.478176, 1.518328, 0, 9.585058e-01, 0, 1.506442, 5.561296e-01}';\n" +
-                "  weight float := -1.750937;\n" +
-                "begin\n" +
-                "  raw :=  weight+(weights1[index[1]] + weights2[index[2]] + weights3[index[3]]);\n" +
-                "  raw := 0.9148520 / (1+exp(-raw));\n" +
-                "  return raw;\n" +
-                "end;\n" +
-                "$$\n" +
-                "language plpgsql;\n" +
-                "\n" +
-                "\n" +
-                "\n" +
-                "\n" +
-                "create or replace function finquiry_subscore_from_inedx(\n" +
-                "\tindex int[]\n" +
-                ")\n" +
-                "returns float as $$\n" +
-                "DECLARE\n" +
-                "  weights1 float[] := '{1.907737, 1.260966, 1.010585, 8.318137e-01, 0, 1.951357, 0, 1.719356}';\n" +
-                "  weights2 float[] := '{2.413596e-05, 2.251582e-01, 5.400251e-01, 1.255076, 0, 0, 1.061504e-01}';\n" +
-                "  weights3 float[] := '{0, 6.095516e-02, 0, 0, 1.125418e-02}';\n" +
-                "  weight float := -1.598351;\n" +
-                "  raw float := 0;\n" +
-                "begin\n" +
-                "  raw :=  weight+(weights1[index[1]] + weights2[index[2]] + weights3[index[3]]);\n" +
-                "  raw := 3.0015073 / (1+exp(-raw));\n" +
-                "  return raw;\n" +
-                "end;\n" +
-                "$$\n" +
-                "language plpgsql;\n" +
-                "\n" +
-                "\n" +
-                "\n" +
-                "create or replace function frevol_balance_subscore_from_index(\n" +
-                "\tindex int[]\n" +
-                ")\n" +
-                "returns float as $$\n" +
-                "DECLARE\n" +
-                "  weights1 float[] := '{0.0001042232, 0.6764476961, 1.3938464180, 2.2581926077, 0, 1.7708134303, 1.0411847907}';\n" +
-                "  weights2 float[] := '{ 0.0756555085, 0, 0.1175915408, 0.2823307493, 0.4242649887, 0, 0.8756715032, 0.0897134843}';\n" +
-                "  weight float := -0.8924856930;\n" +
-                "  raw float := 0;\n" +
-                "begin\n" +
-                "  raw :=  weight+(weights1[index[1]] + weights2[index[2]]);\n" +
-                "  raw := 1.9259728 / (1+exp(-raw));\n" +
-                "  return raw;\n" +
-                "end;\n" +
-                "$$\n" +
-                "language plpgsql;\n" +
-                "\n" +
-                "\n" +
-                "\n" +
-                "create or replace function futilization_subscore_from_index(\n" +
-                "\tindex int\n" +
-                ")\n" +
-                "returns float as $$\n" +
-                "DECLARE\n" +
-                "  weights float[] := '{0, 0.8562096, 1.2047649, 1.1635459, 1.4701220, 0, 1.2392294, 0.4800086}';\n" +
-                "  score_1 float := -0.2415871;\n" +
-                "  raw float := 0;\n" +
-                "begin\n" +
-                "  raw :=  score_1+weights[index];\n" +
-                "  raw := 0.9864329 / (1+exp(-raw));\n" +
-                "  return raw;\n" +
-                "end;\n" +
-                "$$\n" +
-                "language plpgsql;\n" +
-                "\n" +
-                "\n" +
-                "create or replace function ftrade_w_balance_subscore_from_index(\n" +
-                "\tindex int\n" +
-                ")\n" +
-                "returns float as $$\n" +
-                "DECLARE\n" +
-                "  weights float[] := '{0, 0.5966752, 0.9207121, 1.2749998, 1.8474869, 0, 2.2885183, 1.0606029}';\n" +
-                "  score_1 float := -0.8221922;\n" +
-                "  raw float := 0;\n" +
-                "begin\n" +
-                "  raw :=  score_1+weights[index];\n" +
-                "  raw := 0.2949793 / (1+exp(-raw));\n" +
-                "  return raw;\n" +
-                "end;\n" +
-                "$$\n" +
-                "language plpgsql;";
-        String createClassifierSQL = "-- this is the classifier with pre-bucket data\n" +
-                "create or replace function classifier(\n" +
+        String functionForFeatureSQL =
+                "create function classifier(\n" +
                 "\tf1 int,\n" +
                 "\tf2 int,\n" +
                 "\tf3 int,\n" +
@@ -1420,47 +1592,55 @@ public class Expl {
                 ")\n" +
                 "returns int as $$\n" +
                 "DECLARE\n" +
-                "index_1 int := 0;\n" +
-                "index_2 int[3];\n" +
-                "index_3 int := 0;\n" +
-                "index_4 int[4];\n" +
-                "index_5 int[4];\n" +
-                "index_6 int[3];\n" +
-                "index_7 int[3];\n" +
-                "index_8 int[2];\n" +
-                "index_9 int := 0;\n" +
-                "index_10 int := 0;\n" +
+                "    weights1 float[] := '{2.9895622, 2.1651128, 1.4081029, 0.7686735, 0, 0, 0, 1.6943381}';\n" +
+                "\n" +
+                "    weights2_1 float[] := '{8.20842027e-01, 0.525120503, 0.245257364, 0.005524848, 0, 0.418318111, 0.435851213}';\n" +
+                "    weights2_2 float[] := '{0.031074792, 0.006016629, 0, 0, 0.027688067}';\n" +
+                "    weights2_3 float[] := '{1.209930852, 0.694452470, 0.296029824, 0, 0, 0, 0.471490736}';\n" +
+                "\n" +
+                "    weights3 float[] := '{2.412574, 1.245278, 0.6619963, 0.2731984, 5.444148e-09, 0, 0, 0.4338848}';\n" +
+                "\n" +
+                "    weights4_1 float[] := '{2.710260e-04, 9.195886e-01, 9.758620e-01, 1.008107e+01, 9.360290, 0, 0, 3.970360e-01}';\n" +
+                "    weights4_2 float[] := '{1.514937e-01, 3.139667e-01, 0, 2.422345e-01, 0, 0, 3.095043e-02}';\n" +
+                "    weights4_3 float[] := '{2.888436e-01, 9.659472e-01, 5.142479e-01, 2.653203e-01, 8.198233e-07, 0, 0, 3.233593e-01}';\n" +
+                "    weights4_4 float[] := '{8.405069e-06, 3.374686e-01, 4.934466e-01, 8.601860e-01, 9.451724, 0, 0, 1.351433e-01}';\n" +
+                "\n" +
+                "    weights5_1 float[] := '{1.658975, 1.218405, 8.030501e-01, 5.685712e-01, 0, 0, 0, 6.645698e-01}';\n" +
+                "    weights5_2 float[] := '{4.014945e-01, 2.912651e-01, 5.665418e-02, 0,6.935965e-01, 5.470874e-01, 4.786956e-01}';\n" +
+                "    weights5_3 float[] := '{1.004642, 5.654694e-01, 0, 0, 0, 2.841047e-01}';\n" +
+                "    weights5_4 float[] := '{1.378803e-01, 1.101649e-06, 0, 0, 1.051132e-02}';\n" +
+                "\n" +
+                "    weights6_1 float[] := '{9.059412e-05, 1.292266e-01, 4.680034e-01, 8.117938e-01, 1.954441, 0, 0, 1.281830}';\n" +
+                "    weights6_2 float[] := '{0, 1.432068e-01, 3.705526e-01, 0, 4.972869e-03, 1.513885e-01}';\n" +
+                "    weights6_3 float[] := '{1.489759, 1.478176, 1.518328, 0, 9.585058e-01, 0, 1.506442, 5.561296e-01}';\n" +
+                "\n" +
+                "    weights7_1 float[] := '{1.907737, 1.260966, 1.010585, 8.318137e-01, 0, 1.951357, 0, 1.719356}';\n" +
+                "    weights7_2 float[] := '{2.413596e-05, 2.251582e-01, 5.400251e-01, 1.255076, 0, 0, 1.061504e-01}';\n" +
+                "    weights7_3 float[] := '{0, 6.095516e-02, 0, 0, 1.125418e-02}';\n" +
+                "\n" +
+                "    weights8_1 float[] := '{0.0001042232, 0.6764476961, 1.3938464180, 2.2581926077, 0, 1.7708134303, 1.0411847907}';\n" +
+                "    weights8_2 float[] := '{ 0.0756555085, 0, 0.1175915408, 0.2823307493, 0.4242649887, 0, 0.8756715032, 0.0897134843}';\n" +
+                "\n" +
+                "    weights9 float[] := '{0, 0.8562096, 1.2047649, 1.1635459, 1.4701220, 0, 1.2392294, 0.4800086}';\n" +
+                "\n" +
+                "    weights10 float[] := '{0, 0.5966752, 0.9207121, 1.2749998, 1.8474869, 0, 2.2885183, 1.0606029}';\n" +
+                "\n" +
                 "score float := -8.3843046;\n" +
                 "begin\n" +
-                "index_1:= f1;\n" +
-                "index_2[1] = f2;\n" +
-                "index_2[2] = f3;\n" +
-                "index_2[3] = f4;\n" +
-                "index_3:= f5;\n" +
-                "index_4[1] = f6;\n" +
-                "index_4[2] = f7;\n" +
-                "index_4[3] = f12;\n" +
-                "index_4[4] = f13;\n" +
-                "index_5[1] = f8;\n" +
-                "index_5[2] = f9;\n" +
-                "index_5[3] = f10;\n" +
-                "index_5[4] = f11;\n" +
-                "index_6[1] = f14;\n" +
-                "index_6[2] = f19;\n" +
-                "index_6[3] = f21;\n" +
-                "index_7[1] = f15;\n" +
-                "index_7[2] = f16;\n" +
-                "index_7[3] = f17;\n" +
-                "index_8[1] = f18;\n" +
-                "index_8[2] = f20;\n" +
-                "index_9:= f22;\n" +
-                "index_10:= f23;\n" +
-                "score := score + fexternal_risk_subscore_from_index(index_1) + ftrade_open_time_subscore_from_index(index_2)\n" +
-                "        + fnum_sat_trades_subscore_from_index(index_3) + ftrade_freq_subscore_from_index(index_4)\n" +
-                "        + fdelinquency_subscore_from_index(index_5) + finstallment_subscore_from_index(index_6)\n" +
-                "        + finquiry_subscore_from_inedx(index_7) + frevol_balance_subscore_from_index(index_8)\n" +
-                "        + futilization_subscore_from_index(index_9) + ftrade_w_balance_subscore_from_index(index_10);\n" +
-                "score:= 1 / (1+exp(-score));\n" +
+                "\n" +
+                "score := score + 1.5671672 / (1+exp(-(1.4308699 + weights1[f1]))) +\n" +
+                "            2.5236825 / (1 + exp(-(-0.696619002 + weights2_1[f2] + weights2_2[f3] + weights2_3[f4])))\n" +
+                "            + 2.1711503 / (1+exp(-(1.5671672+weights3[f5]))) +\n" +
+                "            0.3323177 / (1+exp(-(-6.480598e-01+weights4_1[f6] + weights4_2[f7] + weights4_3[f12] +\n" +
+                "            weights4_4[f13]))) +\n" +
+                "            2.5396631 / (1+exp(-(-1.199469+weights5_1[f8] + weights5_2[f9] + weights5_3[f10] +\n" +
+                "            weights5_4[f11]))) +\n" +
+                "            0.9148520 / (1+exp(-(-1.750937+weights6_1[f14] + weights6_2[f19] + weights6_3[f21]))) +\n" +
+                "            3.0015073 / (1+exp(-(-1.598351+(weights7_1[f15] + weights7_2[f16] + weights7_3[f17])))) +\n" +
+                "            1.9259728 / (1+exp(-(-0.8924856930+weights8_1[f18] + weights8_2[f20]))) +\n" +
+                "            0.9864329 / (1+exp(-(-0.2415871+weights9[f22]))) +\n" +
+                "            0.2949793 / (1+exp(-(-0.8221922+weights10[f23])));\n" +
+                "score:= 1 / (1+exp(-(score)));\n" +
                 "IF (score < 0.5) THEN\n" +
                 "\treturn 0;\n" +
                 "ELSE\n" +
@@ -1468,11 +1648,10 @@ public class Expl {
                 "END IF;\n" +
                 "end;\n" +
                 "$$\n" +
-                "language plpgsql;\n";
+                "language plpgsql;\n" +
+                "\n";
         PreparedStatement functionForFeature = conn.prepareStatement(functionForFeatureSQL);
-        PreparedStatement createClassifier = conn.prepareStatement(createClassifierSQL);
         functionForFeature.execute();
-        createClassifier.execute();
         conn.commit();
     }
 }

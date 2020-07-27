@@ -16,6 +16,10 @@ public class RESPScore{
             "NumRevolvingTradesWBalance", "NumInstallTradesWBalance", "NumBank2NatlTradesWHighUtilization",
             "PercentTradesWBalance"
     };
+
+    private static final int[] MONOTONE = new int[]{-1, -1, -1, -1, -1, 1, 0, -1, -1, -1, -1, 0, 1, 1, -1, 1,
+            1, 1, 1, 0, 0, 1, 1};
+
     // the start time, helps to calculate the time used for this implementation
     public static  Instant START;
 
@@ -80,9 +84,19 @@ public class RESPScore{
      */
     public static void getRespScore(Connection conn, int trainSize)
             throws SQLException, IOException {
+        // empty space
+        String dropQuery = "";
+        for (int i = 0; i < TEST_FEATURES.length; i++) {
+            dropQuery = dropQuery + " drop view if exists ff" + TEST_FEATURES[i] + " ; ";
+        }
+        dropQuery = dropQuery + "drop TABLE if exists piece; drop TABLE if exists testDataWithBucket; drop TABLE if exists trainDataWithBucket;";
+        PreparedStatement drop = conn.prepareStatement(dropQuery);
+        drop.execute();
+
         // result path
-        String outputPath = "/Users/gzx/Desktop/research/Explanation/src/output/RESPScoreResult.txt";
-        BufferedWriter outputStream = new BufferedWriter(new FileWriter(outputPath));
+//        String outputPath = "/Users/gzx/Desktop/research/Explanation/src/output/RESPScoreResult.txt";
+//        BufferedWriter outputStream = new BufferedWriter(new FileWriter(outputPath));
+
         // input file path
         String path = "/Users/gzx/Desktop/research/fico/heloc_dataset_v2.csv";
         String testTableName = "testDataWithBucket";
@@ -131,7 +145,7 @@ public class RESPScore{
                 }
                 total++;
                 // the scores for each feature with the entities
-                double[] scores = getScoreWithNullContingencySet(conn, trainSize);
+                double[] scores = getScoreWithNullContingencySetWithMonotonicity(conn, trainSize);
 
                 // check that whether need to start with a contingency set, count is the number of 0-scores we get
                 // with null contingent set
@@ -144,16 +158,18 @@ public class RESPScore{
                 // get the score with contingency set of size 1
                 if (count == 23) {
                     // get the score with contingency set of size 1
-                    scores = getScoreWithContingencySetSize1(conn,  trainSize);
+                    scores = getScoreWithContingencySetSize1WithMonotone(conn,  trainSize);
                     zero++;
                 } else {
                     zeroNo++;
                 }
-                outputStream.write(Arrays.toString(scores));
-                outputStream.newLine();
+//                outputStream.write(Arrays.toString(scores));
+//                outputStream.newLine();
                 getMostImportantFeature(scores, mostImportantFeature, most4ImportantFeature);
             }
             // when two contingent set with size 1, there will be two feature has the same score?
+
+
 
         }
         Instant end = Instant.now();
@@ -161,11 +177,11 @@ public class RESPScore{
         System.out.println(timeElapsed);
         System.out.println(Arrays.toString(mostImportantFeature));
         System.out.println(Arrays.toString(most4ImportantFeature));
-        outputStream.write(Arrays.toString(mostImportantFeature));
-        outputStream.newLine();
-        outputStream.write(Arrays.toString(most4ImportantFeature));
-        outputStream.flush();
-        outputStream.close();
+//        outputStream.write(Arrays.toString(mostImportantFeature));
+//        outputStream.newLine();
+//        outputStream.write(Arrays.toString(most4ImportantFeature));
+//        outputStream.flush();
+//        outputStream.close();
     }
 
     /**
@@ -181,6 +197,58 @@ public class RESPScore{
         ResultSet result = getEntity.executeQuery();
         return result;
     }
+
+    /**
+     * get the resp score with null contingency set for an entity
+     *
+     * @param conn connection to database
+     * @param trainSize the train data size
+     * @return the scores of each feature given the entity in the piece table
+     */
+    public static double[] getScoreWithNullContingencySetWithMonotonicity(Connection conn, int trainSize)
+            throws SQLException {
+        double[] scores = new double[TEST_FEATURES.length];
+        // for each of the feature get the score
+        for (int i = 0; i < TEST_FEATURES.length; i++) {
+            String getScoreSQL = "select sum(f.count * (1-classifier( ";
+            for (int j = 0; j < TEST_FEATURES.length-1; j++) {
+                if (i == j){
+                    getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[j] + ", ";
+                } else {
+                    getScoreSQL = getScoreSQL + "t." + TEST_FEATURES[j] + ", ";
+                }
+            }
+            if (i == 22) {
+                getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[22] + " )))";
+            } else {
+                getScoreSQL = getScoreSQL + "t." + TEST_FEATURES[22] + " )))";
+            }
+            getScoreSQL = getScoreSQL + "from piece as t, ff" + TEST_FEATURES[i] +" as f ";
+            if (MONOTONE[i] == -1) {
+                getScoreSQL = getScoreSQL + "where f." + TEST_FEATURES[i]  + "> t." + TEST_FEATURES[i] + " or f." +
+                        TEST_FEATURES[i] + " < 0;";
+            } else if (MONOTONE[i] == 1) {
+                getScoreSQL = getScoreSQL + "where f." + TEST_FEATURES[i]  + "< t." + TEST_FEATURES[i] + " or f." +
+                        TEST_FEATURES[i] + " < 0;";
+            } else {
+                getScoreSQL = getScoreSQL + ";";
+            }
+
+            PreparedStatement getScore = conn.prepareStatement(getScoreSQL);
+            ResultSet resultSet = getScore.executeQuery();
+            resultSet.next();
+            double score = resultSet.getInt(1);
+
+            resultSet.close();
+            // check whether the score is 0 and need recompute with contingency set size 1
+            // the contingency set can be any feature not the current feature -- feature[i]
+            score = score / trainSize;
+            scores[i] = score;
+        }
+        return scores;
+    }
+
+
 
     /**
      * get the resp score with null contingency set for an entity
@@ -219,6 +287,110 @@ public class RESPScore{
             // check whether the score is 0 and need recompute with contingency set size 1
             // the contingency set can be any feature not the current feature -- feature[i]
             score = score / trainSize;
+            scores[i] = score;
+        }
+        return scores;
+    }
+
+    /**
+     * get the resp score with contingency set size 1 for an entity
+     *
+     * @param conn connection to database
+     * @param trainSize the train data size
+     * @return the scores of each feature given the entity in the piece table
+     */
+    public static double[] getScoreWithContingencySetSize1WithMonotone(Connection conn, int trainSize)
+            throws SQLException {
+        double[] scores = new double[TEST_FEATURES.length];
+        double[][] values = new double[23][23];
+        for (int i = 0; i < TEST_FEATURES.length; i++) {
+
+            double score = 0;
+            // for each feature check each of the contingency feature
+            for (int j = 0; j < TEST_FEATURES.length; j++) {
+                if (i != j) {
+                    double currentScore = 0;
+                    if (i > j) {
+                        currentScore = values[j][i];
+                    } else {
+                        String getScoreSQL = "With temp as( select f.count as count_i, c.count as count_j, f." +
+                                TEST_FEATURES[i] + ", c." +  TEST_FEATURES[j] + ", classifier( ";
+                        for (int k = 0; k < TEST_FEATURES.length-1; k++) {
+                            if (k == i){
+                                getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[k] + ", ";
+                            } else if (k == j) {
+                                getScoreSQL = getScoreSQL + "c." + TEST_FEATURES[k] + ", ";
+                            } else {
+                                getScoreSQL = getScoreSQL + "t." + TEST_FEATURES[k] + ", ";
+                            }
+                        }
+                        if (i == 22) {
+                            getScoreSQL = getScoreSQL + "f." + TEST_FEATURES[22] + " )";
+                        } else if (j == 22) {
+                            getScoreSQL = getScoreSQL + "c." + TEST_FEATURES[22] + " )";
+                        } else {
+                            getScoreSQL = getScoreSQL + "t." + TEST_FEATURES[22] + " )";
+                        }
+                        getScoreSQL = getScoreSQL + " as class from piece as t, ff" + TEST_FEATURES[i] + " as f, ff" +
+                                TEST_FEATURES[j] + " as c ";
+                        if (MONOTONE[i] == -1) {
+                            getScoreSQL = getScoreSQL + "where (f." + TEST_FEATURES[i]  + "> t." + TEST_FEATURES[i] +
+                                    " or f." + TEST_FEATURES[i] + " < 0)";
+                        } else if (MONOTONE[i] == 1) {
+                            getScoreSQL = getScoreSQL + "where (f." + TEST_FEATURES[i]  + "< t." + TEST_FEATURES[i] +
+                                    " or f." + TEST_FEATURES[i] + " < 0)";
+                        }
+
+                        if (MONOTONE[j] == -1) {
+                            if (MONOTONE[i]!= 0) {
+                                getScoreSQL = getScoreSQL + " and (c." + TEST_FEATURES[j]  +
+                                        "> t." + TEST_FEATURES[j] + " or c." + TEST_FEATURES[j] + " < 0))";
+                            } else {
+                                getScoreSQL = getScoreSQL + " where (c." + TEST_FEATURES[j]  +
+                                        "> t." + TEST_FEATURES[j] + " or c." + TEST_FEATURES[j] + " < 0))";
+                            }
+                        } else if (MONOTONE[j] == 1) {
+                            if (MONOTONE[i]!= 0) {
+                                getScoreSQL = getScoreSQL + " and (c." + TEST_FEATURES[j]  +
+                                        "> t." + TEST_FEATURES[j] + " or c." + TEST_FEATURES[j] + " < 0))";
+                            } else {
+                                getScoreSQL = getScoreSQL + " where (c." + TEST_FEATURES[j]  + "< t." + TEST_FEATURES[j]
+                                        + " or c." + TEST_FEATURES[j] + " < 0))";
+                            }
+                        } else {
+                            getScoreSQL = getScoreSQL + ")";
+                        }
+
+                        getScoreSQL = getScoreSQL + ", tempFirst as (select sum(temp.count_i*(1-temp.class)) as s from temp  " +
+                                "group by  temp." + TEST_FEATURES[j] + ") , temSecond  as " +
+                                "(select sum(temp.count_j*(1-temp.class))  as s from temp  group by  temp." + TEST_FEATURES[i] +
+                                ") select max(s), 1 from tempFirst union select max(s), 2 from temSecond" +
+                                ";";
+                        //System.out.println(getScoreSQL);
+                        PreparedStatement getScore = conn.prepareStatement(getScoreSQL);
+                        ResultSet resultSet = getScore.executeQuery();
+                        resultSet.next();
+                        if (resultSet.getInt(2) == 1) {
+                            currentScore = resultSet.getInt(1);
+                            double nextScore = resultSet.getInt(1);
+                            if (resultSet.next()) {
+                                nextScore = resultSet.getInt(1);
+                            }
+                            values[i][j] = nextScore;
+                        } else {
+                            double nextScore = resultSet.getInt(1);
+                            resultSet.next();
+                            currentScore = resultSet.getInt(1);
+                            values[i][j] = nextScore;
+                        }
+                        resultSet.close();
+                    }
+                    if (score < currentScore) {
+                        score = currentScore;
+                    }
+                }
+            }
+            score = score / trainSize /2;
             scores[i] = score;
         }
         return scores;
@@ -760,10 +932,11 @@ public class RESPScore{
                 "  weights1 float[] := '{1.658975, 1.218405, 8.030501e-01, 5.685712e-01, 0, 0, 0, 6.645698e-01}';\n" +
                 "  weights2 float[] := '{4.014945e-01, 2.912651e-01, 5.665418e-02, 0,6.935965e-01, 5.470874e-01, 4.786956e-01}';\n" +
                 "  weights3 float[] := '{1.004642, 5.654694e-01, 0, 0, 0, 2.841047e-01}';\n" +
+                "  weights4 float[] := '{1.378803e-01, 1.101649e-06, 0, 0, 1.051132e-02}';"+
                 "  weight float := -1.199469;\n" +
                 "  raw float := 0;\n" +
                 "begin\n" +
-                "  raw :=  weight+(weights1[index[1]] + weights2[index[2]] + weights3[index[3]]);\n" +
+                "  raw :=  weight+(weights1[index[1]] + weights2[index[2]] + weights3[index[3]] + weights4[index[4]]);\n" +
                 "  raw := 2.5396631 / (1+exp(-raw));\n" +
                 "  return raw;\n" +
                 "end;\n" +

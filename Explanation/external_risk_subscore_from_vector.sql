@@ -1,6 +1,6 @@
 
 -- get the subscore for external_risk_subscore_from_index
-create OR REPLACE function external_risk_subscore_from_index(
+create function external_risk_subscore_from_index(
 	index int
 )
 returns float as $$
@@ -18,7 +18,7 @@ language plpgsql;
 
 
 
-create OR REPLACE function trade_open_time_subscore_from_index(
+create function trade_open_time_subscore_from_index(
 	index int[]
 )
 returns float as $$
@@ -84,10 +84,11 @@ DECLARE
   weights1 float[] := '{1.658975, 1.218405, 8.030501e-01, 5.685712e-01, 0, 0, 0, 6.645698e-01}';
   weights2 float[] := '{4.014945e-01, 2.912651e-01, 5.665418e-02, 0,6.935965e-01, 5.470874e-01, 4.786956e-01}';
   weights3 float[] := '{1.004642, 5.654694e-01, 0, 0, 0, 2.841047e-01}';
+  weights4 float[] := '{1.378803e-01, 1.101649e-06, 0, 0, 1.051132e-02}';
   weight float := -1.199469;
   raw float := 0;
 begin
-  raw :=  weight+(weights1[index[1]] + weights2[index[2]] + weights3[index[3]]);
+  raw :=  weight+(weights1[index[1]] + weights2[index[2]] + weights3[index[3]] + weights4[index[4]]);
   raw := 2.5396631 / (1+exp(-raw));
   return raw;
 end;

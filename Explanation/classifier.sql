@@ -1,5 +1,5 @@
 -- this is the classifier with pre-bucket data
-create OR REPLACE function classifier2(
+create function classifier(
 	f1 int,
 	f2 int,
 	f3 int,
@@ -39,26 +39,34 @@ index_10 int := 0;
 score float := -8.3843046;
 begin
 index_1:= f1;
+
 index_2[1] = f2;
 index_2[2] = f3;
 index_2[3] = f4;
+
 index_3:= f5;
+
 index_4[1] = f6;
 index_4[2] = f7;
 index_4[3] = f12;
 index_4[4] = f13;
+
 index_5[1] = f8;
 index_5[2] = f9;
 index_5[3] = f10;
 index_5[4] = f11;
+
 index_6[1] = f14;
 index_6[2] = f19;
 index_6[3] = f21;
+
 index_7[1] = f15;
 index_7[2] = f16;
 index_7[3] = f17;
+
 index_8[1] = f18;
 index_8[2] = f20;
+
 index_9:= f22;
 index_10:= f23;
 score := score + external_risk_subscore_from_index(index_1) + trade_open_time_subscore_from_index(index_2)
